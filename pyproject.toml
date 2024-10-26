@@ -1,0 +1,33 @@
+[build-system]
+requires = ["setuptools", "wheel"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "ccfx"
+version = "0.1.0"
+description = "Your package description here"
+readme = "README.md"
+license = {text = "MIT"}
+authors = [{name = "Celray James CHAWANDA", email = "celray@chawanda.com"}]
+classifiers = [
+    "Programming Language :: Python :: 3",
+    "License :: OSI Approved :: MIT License",
+    "Operating System :: OS Independent",
+]
+requires-python = ">=3.9"
+dependencies = [
+    "netCDF4",
+    "gdal",
+    "numpy",
+    "shapely",
+    "geopandas",
+    "pandas",
+    "xlsxwriter",
+    "pyodbc",
+    "sqlalchemy",
+    "docx",
+]
+
+[project.urls]
+"Homepage" = "https://github.com/celray/ccfx"
+
