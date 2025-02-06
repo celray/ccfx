@@ -1,3 +1,5 @@
 
 dist
 ccfx.egg-info
+publishVersion.py
+*.pyc

@@ -23,7 +23,10 @@ import pickle
 import time
 from shapely.geometry import box, Point
 import geopandas, pandas
-from osgeo import gdal
+from osgeo import gdal, ogr, osr
+import py7zr
+import subprocess
+import multiprocessing
 
 
 
@@ -54,8 +57,10 @@ def getExtension(filePath:str) -> str:
     '''
     Get the extension of a file
     filePath: file path
+
+    return: file extension without the dot
     '''
-    return os.path.splitext(filePath)[1]
+    return os.path.splitext(filePath)[1].lstrip('.')
 
 
 def deleteFile(filePath:str, v:bool = False) -> bool:
@@ -84,6 +89,47 @@ def deleteFile(filePath:str, v:bool = False) -> bool:
     
     return deleted
 
+def deletePath(path:str, v:bool = False) -> bool:
+    '''
+    Delete a directory
+
+    path: directory
+    v: verbose (default is True)
+
+    return: True if the directory is deleted, False otherwise
+    '''
+    deleted = False
+    if os.path.exists(path):
+        try:
+            shutil.rmtree(path)
+            deleted = True
+        except:
+            print(f'! Could not delete {path}')
+            deleted = False
+        if v:
+            print(f'> {path} deleted')
+    else:
+        if v:
+            print(f'! {path} does not exist')
+        deleted = False
+
+
+def mergeRasterTiles(tileList:list, outFile:str) -> str:
+    '''
+    Merge raster tiles into one raster file
+    tileList: list of raster files
+    outFile: output raster file
+    '''
+    gdal.Warp(outFile, tileList)
+    return outFile
+
+def mergeRasterFiles(tileList:list, outFile:str) -> str:
+    '''
+    this function is an alias for mergeRasterTiles
+    '''
+    return mergeRasterTiles(tileList, outFile)
+
+
 def systemPlatform() -> str:
     '''
     Get the system platform
@@ -110,6 +156,55 @@ def fileCount(path:str = "./", extension:str = ".*", v:bool = True) -> int:
         print(f'> there are {count} {extension if not extension ==".*" else ""} files in {path}')
     return count
 
+def resampleRaster(inFile:str, outFile:str, resolution:float, dstSRS = None, resamplingMethod = 'bilinear', replaceOutput:bool = True, v:bool = True) -> str:
+    '''
+    Resample a raster file
+    inFile: input raster file
+    outFile: output raster file
+    resolution: resolution in the same units as the input raster
+    v: verbose (default is True)
+    available resample types:
+        'nearest', 'bilinear', 'cubic', 'cubicspline', 'lanczos', 'average', 'mode', 'max', 'min', 'med', 'q1', 'q3'
+    
+    return: output raster file path
+    '''
+
+    resamleTypes = {
+        'nearest': gdal.GRA_NearestNeighbour,
+        'bilinear': gdal.GRA_Bilinear,
+        'cubic': gdal.GRA_Cubic,
+        'cubicspline': gdal.GRA_CubicSpline,
+        'lanczos': gdal.GRA_Lanczos,
+        'average': gdal.GRA_Average,
+        'mode': gdal.GRA_Mode,
+        'max': gdal.GRA_Max,
+        'min': gdal.GRA_Min,
+        'med': gdal.GRA_Med,
+        'q1': gdal.GRA_Q1,
+        'q3': gdal.GRA_Q3
+    }
+
+    if not os.path.exists(inFile):
+        print(f'! {inFile} does not exist')
+        return None
+    
+    if os.path.exists(outFile):
+        if replaceOutput:
+            os.remove(outFile)
+        else:
+            print(f'! {outFile} already exists')      
+            return None
+    
+    if v:
+        print(f'> resampling {inFile} to {outFile} at {resolution}')
+    
+    ds = gdal.Open(inFile)
+    if dstSRS is None: gdal.Warp(outFile, ds, xRes=resolution, yRes=resolution, resampleAlg=resamleTypes[resamplingMethod])
+    else: gdal.Warp(outFile, ds, xRes=resolution, yRes=resolution, resampleAlg=resamleTypes[resamplingMethod], dstSRS=dstSRS)
+
+    ds = None
+    return outFile
+
 def watchFileCount(path:str="./", extension:str = ".*", interval:float = 0.2, duration = 3, v:bool = True) -> None:
     '''
     Watch the number of files in a directory with a specific extension
@@ -130,9 +225,6 @@ def watchFileCount(path:str="./", extension:str = ".*", interval:float = 0.2, du
         time.sleep(interval)
     
     return None
-
-
-
 
 
 def pythonVariable(filename, option, variable=None):
@@ -233,6 +325,57 @@ def createPath(pathName, v = False):
     return pathName
 
 
+def renameNetCDFvariable(input_file: str, output_file: str, old_var_name: str, new_var_name: str, v = False) -> None:
+    """
+    Renames a variable in a NetCDF file using CDO if it exists.
+    If the variable does not exist, the file is copied without modification.
+    
+    :param input_file: Path to the input NetCDF file
+    :param output_file: Path to the output NetCDF file
+    :param old_var_name: Name of the variable to rename
+    :param new_var_name: New name for the variable
+    """
+    try:
+        # Check if the variable exists in the input file using `cdo showname`
+        result = subprocess.run(
+            ["cdo", "showname", input_file],
+            capture_output=True,
+            text=True,
+            check=True
+        )
+        
+        # Check if the old variable name is in the output
+        if old_var_name in result.stdout:
+            # Rename the variable using `cdo chname`
+            subprocess.run(
+                ["cdo", f"chname,{old_var_name},{new_var_name}", input_file, output_file],
+                check=True
+            )
+            if v: print(f"Variable '{old_var_name}' renamed to '{new_var_name}' in '{output_file}'.")
+        else:
+            # Copy the file without renaming
+            shutil.move(input_file, output_file)
+            if v: print(f"Variable '{old_var_name}' not found; '{input_file}' moved to '{output_file}' without modification.")
+    
+    except subprocess.CalledProcessError as e:
+        print(f"Error: {e.stderr}")
+
+def compressTo7z(input_dir: str, output_file: str):
+    """
+    Compresses the contents of a directory to a .7z archive with maximum compression.
+    
+    :param input_dir: Path to the directory to compress
+    :param output_file: Output .7z file path
+    """
+    # Create the .7z archive with LZMA2 compression
+    with py7zr.SevenZipFile(output_file, 'w', filters=[{'id': py7zr.FILTER_LZMA2, 'preset': 9}]) as archive:
+        # Add each item in the input directory, avoiding the top-level folder in the archive
+        for root, _, files in os.walk(input_dir):
+            for file in files:
+                file_path = os.path.join(root, file)
+                # Add file to the archive with a relative path to avoid including the 'tmp' folder itself
+                archive.write(file_path, arcname=os.path.relpath(file_path, start=input_dir))
+
 
 def moveDirectory(srcDir:str, destDir:str, v:bool = False) -> bool:
     '''
@@ -315,6 +458,99 @@ def clipRasterByExtent(inFile: str, outFile: str, bounds: tuple) -> str:
     ds = None
     return outFile
 
+def clipVectorByExtent(inFile: str, outFile: str, bounds: tuple) -> str:
+    '''
+    Clips a vector using GeoPandas
+    inFile: input vector path
+    outFile: output path
+    bounds: tuple (minx, miny, maxx, maxy)
+    return: output path
+    '''
+    # Load the vector file as a GeoDataFrame
+    gdf = geopandas.read_file(inFile)
+    bbox = box(bounds[0], bounds[1], bounds[2], bounds[3])
+    clipped = gdf.clip(bbox)
+    clipped.to_file(outFile)
+    
+    return outFile
+
+def reprojectRaster(inFile: str, outFile: str, dstProjection: str, resamplingMethod: str = 'mode') -> str:
+    '''
+    Reprojects a raster to a new projection
+    inFile: input raster path
+    outFile: output raster path
+    dstProjection: target projection in "AUTH:CODE" format (e.g., "EPSG:3395")
+    resamplingMethod: resampling method to use (default is 'mode')
+    return: output path
+    '''
+    # Open the input raster
+    ds = gdal.Open(inFile)
+    
+    # Define resampling method
+    resampling_methods = {
+        'nearest': gdal.GRA_NearestNeighbour,
+        'bilinear': gdal.GRA_Bilinear,
+        'cubic': gdal.GRA_Cubic,
+        'cubicspline': gdal.GRA_CubicSpline,
+        'lanczos': gdal.GRA_Lanczos,
+        'average': gdal.GRA_Average,
+        'mode': gdal.GRA_Mode,
+        'max': gdal.GRA_Max,
+        'min': gdal.GRA_Min,
+        'med': gdal.GRA_Med,
+        'q1': gdal.GRA_Q1,
+        'q3': gdal.GRA_Q3
+    }
+    
+    resampling = resampling_methods.get(resamplingMethod, gdal.GRA_Mode)
+    gdal.Warp(outFile, ds, dstSRS=dstProjection, resampleAlg=resampling)
+    ds = None
+    
+    return outFile
+
+def rasterizeRaster(inFile: str, outFile: str, targetField: str, targetResolution: float) -> str:
+    '''
+    Rasterizes a vector layer to a raster file
+    inFile: input vector file path
+    outFile: output raster file path
+    targetField: the field in the vector layer to use as the raster value
+    targetResolution: resolution of the output raster (in units of the vector CRS)
+    return: output raster path
+    '''
+    # Open the vector file
+    vector_ds = ogr.Open(inFile)
+    layer = vector_ds.GetLayer()
+    
+    # Get the extent of the vector layer
+    x_min, x_max, y_min, y_max = layer.GetExtent()
+    
+    # Calculate the raster size based on target resolution
+    x_res = int((x_max - x_min) / targetResolution)
+    y_res = int((y_max - y_min) / targetResolution)
+    
+    # Create the raster dataset
+    target_ds = gdal.GetDriverByName('GTiff').Create(outFile, x_res, y_res, 1, gdal.GDT_Int16)
+    target_ds.SetGeoTransform((x_min, targetResolution, 0, y_max, 0, -targetResolution))
+    
+    # Set the projection from the vector layer
+    srs = layer.GetSpatialRef()
+    target_ds.SetProjection(srs.ExportToWkt())
+    
+    # Set the no-data value to -999
+    band = target_ds.GetRasterBand(1)
+    band.SetNoDataValue(-999)
+
+    # Rasterize the vector layer
+    gdal.RasterizeLayer(target_ds, [1], layer, options=["ATTRIBUTE=" + targetField])
+    
+    # Close the datasets
+    band = None
+    target_ds = None
+    vector_ds = None
+    
+    return outFile
+
+
 def getVectorBounds(grid_gdf: geopandas.GeoDataFrame) -> tuple:
     '''
     This function gets the bounds of a GeoDataFrame
@@ -338,7 +574,6 @@ def getVectorBounds(grid_gdf: geopandas.GeoDataFrame) -> tuple:
         maxy = max(maxy, geom_maxy)
 
     return minx, miny, maxx, maxy
-
 
 def ignoreWarnings(ignore:bool = True, v:bool = False) -> None:
     '''
@@ -497,7 +732,7 @@ def netcdfExportTif(ncFile: str, variable: str, outputFile: str = None, band: in
     return dataset
 
 
-def getFileBaseName(filePath:str, extension:bool = False) -> str:
+def getFileBaseName(filePath:str, extension:bool = True) -> str:
     '''
     Get the base name of a file
     filePath: file path
@@ -568,10 +803,62 @@ def copyFile(source:str, destination:str, v:bool = True) -> None:
     source: source file
     destination: destination file
     '''
+    if not exists(os.path.dirname(destination)): createPath(f"{os.path.dirname(destination)}/")
     with open(source, 'rb') as src:
         with open(destination, 'wb') as dest: dest.write(src.read())
     
     if v: print(f'> {source} copied to \t - {destination}')
+
+
+def copyDirectory(source:str, destination:str, recursive = True, v:bool = True, filter = []) -> None:
+    '''
+    Copy a directory from source to destination
+    source: source directory
+    destination: destination directory
+    recursive: copy subdirectories (default is True)
+    v: verbose (default is True)
+    filter: list of file extensions to filter out
+    '''
+    if not exists(destination): os.makedirs(destination)
+
+    itemCount = None
+    counter = 1
+
+    if recursive:
+        if len(filter) > 0:
+            itemCount = len([fn for fn in listAllFiles(source) if not getExtension(fn) in filter])
+        else:
+            itemCount = len(listAllFiles(source))
+    else:
+        if len(filter) > 0:
+            itemCount = len([fn for fn in listFiles(source) if not getExtension(fn) in filter])
+        else:
+            itemCount = len(listFiles(source))
+
+
+    for item in os.listdir(source):
+        s = os.path.join(source, item)
+        d = os.path.join(destination, item)
+        if os.path.isdir(s):
+            if recursive: copyDirectory(s, d, recursive, v, filter)
+        else:
+            if len(filter) > 0:
+                if not getExtension(s) in filter:
+                    copyFile(s, d, v = False)
+                    counter += 1
+                    if v: showProgress(counter, itemCount, f'copying {getFileBaseName(item)}\t\t', barLength=50)
+            else:
+                copyFile(s, d, v = False)
+                if v: showProgress(counter, itemCount, f'copying {getFileBaseName(item)}\t\t', barLength=50)
+                counter += 1
+    print()
+
+
+def copyFolder(source:str, destination:str, v:bool = True) -> None:
+    '''
+    this function is an alias for copyDirectory
+    '''
+    copyDirectory(source, destination, v)
 
 
 def convertCoordinates(lon, lat, srcEPSG, dstCRS) -> tuple:
@@ -664,8 +951,31 @@ def showProgress(count: int, end: int, message: str, barLength: int = 100) -> No
     filled = int(barLength * count / end)
     bar = '█' * filled + '░' * (barLength - filled)
     print(f'\r{bar}| {percentStr}% [{count}/{end}] | {message}       ', end='', flush=True)
-    if count == end: print()
+    if count == end:
+        print(f'\r{bar}| {percentStr}% [{count}/{end}]                          ', end='', flush=True)
+        print()
 
+
+def listAllFiles(folder, extension="*"):
+    list_of_files = []
+    # Getting the current work directory (cwd)
+    thisdir = folder
+
+    # r=root, d=directories, f = files
+    for r, d, f in os.walk(thisdir):
+        for file in f:
+            if extension == "*":
+                list_of_files.append(os.path.join(r, file))
+            elif "." in extension:
+                if file.endswith(extension[1:]):
+                    list_of_files.append(os.path.join(r, file))
+                    # print(os.path.join(r, file))
+            else:
+                if file.endswith(extension):
+                    list_of_files.append(os.path.join(r, file))
+                    # print(os.path.join(r, file))
+
+    return list_of_files
 
 
 def createPointGeometry(coords: list, proj: str = "EPSG:4326") -> geopandas.GeoDataFrame:
@@ -690,5 +1000,339 @@ def createPointGeometry(coords: list, proj: str = "EPSG:4326") -> geopandas.GeoD
     gdf = geopandas.GeoDataFrame(df, geometry=geoms, crs=proj)
     gdf.reset_index(inplace=True)
     return gdf
+
+def calculateTimeseriesStats(data:pandas.DataFrame, observed:str = None, simulated:str = None, resample:str = None ) -> dict:
+    '''
+    Calculate statistics for a timeseries
+
+    the assumed dataframe structure is:
+        date - DateTime
+        observed - float
+        simulated - float
+        
+    Parameters:
+        data: pandas.DataFrame
+            DataFrame containing the timeseries data
+        observed: str
+            name of the observed column
+        simulated: str
+            name of the simulated column
+        resample: str
+            if specified, the data will be resampled to the specified frequency
+            available options: 'H' (hourly), 'D' (daily), 'M' (monthly), 'Y' (yearly)
+
+    Returns:
+        dict: Dictionary containing the following statistics:
+            NSE: Nash-Sutcliffe Efficiency
+            KGE: Kling-Gupta Efficiency
+            PBIAS: Percent Bias
+            LNSE: Log Nash-Sutcliffe Efficiency
+            R2: R-squared
+            RMSE: Root Mean Square Error
+            MAE: Mean Absolute Error
+            MSE: Mean Square Error
+            MAPE: Mean Absolute Percentage Error
+            alpha: Ratio of standard deviations
+            beta: Ratio of means
+    '''
+
+    options = {'H': '1H', 'D': '1D', 'M': '1M', 'Y': '1Y'}
+
+    if resample:
+        if resample not in options:
+            raise ValueError(f"Invalid resample option. Choose from {list(options.keys())}")
+        if not 'date' in data.columns:
+            for col in data.columns:
+                if data[col].dtype == 'datetime64[ns]':
+                    data = data.set_index(col).resample(options[resample]).mean()
+                    break
+            else:
+                raise ValueError("No datetime column found for resampling.")
+        else:
+            data = data.set_index('date').resample(options[resample]).mean()
+
+    # Auto-detect columns if not specified
+    if not observed and not simulated:
+        datetime_cols = [col for col in data.columns if data[col].dtype == 'datetime64[ns]']
+        if datetime_cols:
+            data = data.drop(datetime_cols, axis=1)
+        
+        if len(data.columns) == 2:
+            observed = data.columns[0]
+            simulated = data.columns[1]
+        else:
+            raise ValueError("Could not automatically detect observed and simulated columns")
+    elif not observed or not simulated:
+        raise ValueError("Both observed and simulated columns must be specified if one is specified")
+
+    # Extract data
+    obs = data[observed].values
+    sim = data[simulated].values
+
+    # Remove any rows where either observed or simulated is NaN
+    mask = ~(numpy.isnan(obs) | numpy.isnan(sim))
+    obs = obs[mask]
+    sim = sim[mask]
+
+    if len(obs) == 0:
+        raise ValueError("No valid data points after removing NaN values")
+
+    # Calculate statistics with error handling
+    try:
+        # Nash-Sutcliffe Efficiency (NSE)
+        denominator = numpy.sum((obs - numpy.mean(obs)) ** 2)
+        nse = 1 - numpy.sum((obs - sim) ** 2) / denominator if denominator != 0 else numpy.nan
+
+        # Kling-Gupta Efficiency (KGE) components
+        r = numpy.corrcoef(obs, sim)[0, 1]
+        obs_std = numpy.std(obs)
+        sim_std = numpy.std(sim)
+        obs_mean = numpy.mean(obs)
+        sim_mean = numpy.mean(sim)
+        
+        alpha = sim_std / obs_std if obs_std != 0 else numpy.nan
+        beta = sim_mean / obs_mean if obs_mean != 0 else numpy.nan
+        
+        # KGE calculation
+        if not any(numpy.isnan([r, alpha, beta])):
+            kge = 1 - numpy.sqrt((r - 1) ** 2 + (alpha - 1) ** 2 + (beta - 1) ** 2)
+        else:
+            kge = numpy.nan
+
+        # Percent Bias (PBIAS)
+        pbias = 100 * numpy.sum(sim - obs) / numpy.sum(obs) if numpy.sum(obs) != 0 else numpy.nan
+
+        # Log Nash-Sutcliffe Efficiency (LNSE)
+        eps = 0.0001
+        log_obs = numpy.log(obs + eps)
+        log_sim = numpy.log(sim + eps)
+        log_denominator = numpy.sum((log_obs - numpy.mean(log_obs)) ** 2)
+        lnse = 1 - numpy.sum((log_obs - log_sim) ** 2) / log_denominator if log_denominator != 0 else numpy.nan
+
+        # R-squared (R2)
+        r2 = r ** 2 if not numpy.isnan(r) else numpy.nan
+
+        # Root Mean Square Error (RMSE)
+        rmse = numpy.sqrt(numpy.mean((obs - sim) ** 2))
+
+        # Mean Absolute Error (MAE)
+        mae = numpy.mean(numpy.abs(obs - sim))
+
+        # Mean Square Error (MSE)
+        mse = numpy.mean((obs - sim) ** 2)
+
+        # Mean Absolute Percentage Error (MAPE)
+        with numpy.errstate(divide='ignore', invalid='ignore'):
+            mape = numpy.mean(numpy.abs((obs - sim) / obs) * 100)
+            mape = numpy.nan if numpy.isinf(mape) else mape
+
+    except Exception as e:
+        print(f"Warning: Error in statistical calculations: {str(e)}")
+        return {stat: numpy.nan for stat in ['NSE', 'KGE', 'PBIAS', 'LNSE', 'R2', 'RMSE', 'MAE', 'MSE', 'MAPE', 'alpha', 'beta']}
+
+    return {
+        'NSE': nse,
+        'KGE': kge,
+        'PBIAS': pbias,
+        'LNSE': lnse,
+        'R2': r2,
+        'RMSE': rmse,
+        'MAE': mae,
+        'MSE': mse,
+        'MAPE': mape,
+        'alpha': alpha,
+        'beta': beta
+    }
+
+
+def getNSE(data:pandas.DataFrame, observed:str = None, simulated:str = None, resample:str = None ) -> float:
+    '''
+    this function is a wrapper for calculateTimeseriesStats specifically to return the NSE
+
+    data: pandas.DataFrame
+        DataFrame containing the timeseries data
+    observed: str
+        name of the observed column
+    simulated: str
+        name of the simulated column
+    resample: str
+        if specified, the data will be resampled to the specified frequency
+        available options: 'H' (hourly), 'D' (daily), 'M' (monthly), 'Y' (yearly)
+
+    return: float
+        NSE value
+    '''
+    stats = calculateTimeseriesStats(data, observed, simulated, resample)
+
+    return stats['NSE']
+
+def getKGE(data:pandas.DataFrame, observed:str = None, simulated:str = None, resample:str = None ) -> float:
+    '''
+    this function is a wrapper for calculateTimeseriesStats specifically to return the KGE
+
+    data: pandas.DataFrame
+        DataFrame containing the timeseries data
+    observed: str
+        name of the observed column
+    simulated: str
+        name of the simulated column
+    resample: str
+        if specified, the data will be resampled to the specified frequency
+        available options: 'H' (hourly), 'D' (daily), 'M' (monthly), 'Y' (yearly)
+
+    return: float
+        KGE value
+    '''
+    stats = calculateTimeseriesStats(data, observed, simulated, resample)
+
+    return stats['KGE']
+
+def getPBIAS(data:pandas.DataFrame, observed:str = None, simulated:str = None, resample:str = None ) -> float:
+    '''
+    this function is a wrapper for calculateTimeseriesStats specifically to return the PBIAS
+
+    data: pandas.DataFrame
+        DataFrame containing the timeseries data
+    observed: str
+        name of the observed column
+    simulated: str
+        name of the simulated column
+    resample: str
+        if specified, the data will be resampled to the specified frequency
+        available options: 'H' (hourly), 'D' (daily), 'M' (monthly), 'Y' (yearly)
+
+    return: float
+        PBIAS value
+    '''
+    stats = calculateTimeseriesStats(data, observed, simulated, resample)
+
+    return stats['PBIAS']
+
+
+def getLNSE(data:pandas.DataFrame, observed:str = None, simulated:str = None, resample:str = None ) -> float:
+    '''
+    this function is a wrapper for calculateTimeseriesStats specifically to return the LNSE
+
+    data: pandas.DataFrame
+        DataFrame containing the timeseries data
+    observed: str
+        name of the observed column
+    simulated: str
+        name of the simulated column
+    resample: str
+        if specified, the data will be resampled to the specified frequency
+        available options: 'H' (hourly), 'D' (daily), 'M' (monthly), 'Y' (yearly)
+
+    return: float
+        LNSE value
+    '''
+    stats = calculateTimeseriesStats(data, observed, simulated, resample)
+
+    return stats['LNSE']
+
+def getR2(data:pandas.DataFrame, observed:str = None, simulated:str = None, resample:str = None ) -> float:
+    '''
+    this function is a wrapper for calculateTimeseriesStats specifically to return the R2
+
+    data: pandas.DataFrame
+        DataFrame containing the timeseries data
+    observed: str
+        name of the observed column
+    simulated: str
+        name of the simulated column
+    resample: str
+        if specified, the data will be resampled to the specified frequency
+        available options: 'H' (hourly), 'D' (daily), 'M' (monthly), 'Y' (yearly)
+
+    return: float
+        R2 value
+    '''
+    stats = calculateTimeseriesStats(data, observed, simulated, resample)
+
+    return stats['R2']
+
+def getRMSE(data:pandas.DataFrame, observed:str = None, simulated:str = None, resample:str = None ) -> float:
+    '''
+    this function is a wrapper for calculateTimeseriesStats specifically to return the RMSE
+
+    data: pandas.DataFrame
+        DataFrame containing the timeseries data
+    observed: str
+        name of the observed column
+    simulated: str
+        name of the simulated column
+    resample: str
+        if specified, the data will be resampled to the specified frequency
+        available options: 'H' (hourly), 'D' (daily), 'M' (monthly), 'Y' (yearly)
+
+    return: float
+        RMSE value
+    '''
+    stats = calculateTimeseriesStats(data, observed, simulated, resample)
+
+    return stats['RMSE']
+
+def getMAE(data:pandas.DataFrame, observed:str = None, simulated:str = None, resample:str = None ) -> float:
+    '''
+    this function is a wrapper for calculateTimeseriesStats specifically to return the MAE
+
+    data: pandas.DataFrame
+        DataFrame containing the timeseries data
+    observed: str
+        name of the observed column
+    simulated: str
+        name of the simulated column
+    resample: str
+        if specified, the data will be resampled to the specified frequency
+        available options: 'H' (hourly), 'D' (daily), 'M' (monthly), 'Y' (yearly)
+
+    return: float
+        MAE value
+    '''
+    stats = calculateTimeseriesStats(data, observed, simulated, resample)
+
+    return stats['MAE']
+
+def getMSE(data:pandas.DataFrame, observed:str = None, simulated:str = None, resample:str = None ) -> float:
+    '''
+    this function is a wrapper for calculateTimeseriesStats specifically to return the MSE
+
+    data: pandas.DataFrame
+        DataFrame containing the timeseries data
+    observed: str
+        name of the observed column
+    simulated: str
+        name of the simulated column
+    resample: str
+        if specified, the data will be resampled to the specified frequency
+        available options: 'H' (hourly), 'D' (daily), 'M' (monthly), 'Y' (yearly)
+
+    return: float
+        MSE value
+    '''
+    stats = calculateTimeseriesStats(data, observed, simulated, resample)
+
+    return stats['MSE']
+
+def getTimeseriesStats(data:pandas.DataFrame, observed:str = None, simulated:str = None, resample:str = None ) -> dict:
+    '''
+    this function is a wrapper for calculateTimeseriesStats specifically to return all stats
+
+    data: pandas.DataFrame
+        DataFrame containing the timeseries data
+    observed: str
+        name of the observed column
+    simulated: str
+        name of the simulated column
+    resample: str
+        if specified, the data will be resampled to the specified frequency
+        available options: 'H' (hourly), 'D' (daily), 'M' (monthly), 'Y' (yearly)
+
+    return: dict
+        dictionary containing all stats
+    '''
+    stats = calculateTimeseriesStats(data, observed, simulated, resample)
+
+    return stats
 
 ignoreWarnings()

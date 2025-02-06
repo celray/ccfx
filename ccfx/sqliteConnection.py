@@ -33,19 +33,28 @@ class sqliteConnection:
 
     def updateValue(self, table_name, col_name, new_value, col_where1, val_1, v=False):
         """
-        does not work yet!
+        Updates a single value in a specified table where the condition matches.
+        
+        Args:
+            table_name (str): Name of the table to update
+            col_name (str): Name of the column to update
+            new_value: Value to set (can be None)
+            col_where1 (str): Column name for WHERE clause
+            val_1: Value to match in WHERE clause
+            v (bool): Verbose flag for logging
         """
-        if not new_value is None:
-            new_value = str(new_value)
-            self.cursor.execute("UPDATE " + table_name + " SET " + col_name +
-                                " = '" + new_value + "' WHERE " + col_where1 + " = " + val_1 + ";")
-        if new_value is None:
-            self.cursor.execute("UPDATE " + table_name + " SET " + col_name +
-                                " = ? " + " WHERE " + col_where1 + " = ?", (new_value, val_1))
-        # self.cursor.execute(sql_str)
-        if v:
-            self.report("\t -> updated {1} value in {0}".format(
-                self.db_name.split("/")[-1].split("\\")[-1], table_name))
+        try:
+            # Use parameterized queries for ALL cases to prevent SQL injection
+            query = f"UPDATE {table_name} SET {col_name} = ? WHERE {col_where1} = ?"
+            self.cursor.execute(query, (new_value, val_1))
+            
+            if v:
+                self.report(f"\t -> updated value in {self.db_name} table: {table_name}")
+            
+            
+        except Exception as e:
+            raise Exception(f"Error updating value: {str(e)}")
+        
 
     def createTable(self, table_name, initial_field_name, data_type):
         '''

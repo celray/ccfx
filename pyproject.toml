@@ -4,8 +4,8 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "ccfx"
-version = "0.1.0"
-description = "Your package description here"
+version = "0.4.0"
+description = "This package implifies regular coommon actions for quick prototyping in a user friendly way"
 readme = "README.md"
 license = {text = "MIT"}
 authors = [{name = "Celray James CHAWANDA", email = "celray@chawanda.com"}]
@@ -14,7 +14,7 @@ classifiers = [
     "License :: OSI Approved :: MIT License",
     "Operating System :: OS Independent",
 ]
-requires-python = ">=3.9"
+requires-python = ">=3.10"
 dependencies = [
     "netCDF4",
     "gdal",
@@ -25,7 +25,8 @@ dependencies = [
     "xlsxwriter",
     "pyodbc",
     "sqlalchemy",
-    "docx",
+    "python-docx",
+    "py7zr",
 ]
 
 [project.urls]
