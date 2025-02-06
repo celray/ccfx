@@ -439,8 +439,11 @@ def moveDirectoryFiles(srcDir: str, destDir: str, v: bool = False) -> bool:
             src_file = os.path.join(root, file)
             dest_file = os.path.join(dest_root, file)
             if v:
-                print(f"\t> Moving file \n\t - {src_file}\n\t - to {dest_file}")
-            shutil.move(src_file, dest_file)
+                print(f"\t> Moving file \n\t - {src_file}\n\t     to {dest_file}")
+            try:
+                shutil.move(src_file, dest_file)
+            except Exception as e:
+                print(f"! Error moving file: {e}")
 
     return True
 
