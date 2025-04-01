@@ -27,7 +27,8 @@ from osgeo import gdal, ogr, osr
 import py7zr
 import subprocess
 import multiprocessing
-
+from mutagen.mp3 import MP3
+from mutagen.id3 import ID3, TPE1, TALB, TIT2, TRCK, TDRC, TCON, APIC, COMM, USLT, TPE2, TCOM, TPE3, TPE4, TCOP, TENC, TSRC, TBPM
 
 
 # functions
@@ -61,6 +62,138 @@ def getExtension(filePath:str) -> str:
     return: file extension without the dot
     '''
     return os.path.splitext(filePath)[1].lstrip('.')
+
+
+def getMp3Metadata(fn, imagePath=None):
+    '''
+    This function takes a path to mp3 and returns a dictionary with
+    the following keys:
+    - artist, album, title, track number, year, genre
+    '''
+    metadata = {}
+    
+    try:
+        audio = MP3(fn, ID3=ID3)
+        
+        if 'TPE1' in audio.tags: metadata['artist'] = str(audio.tags['TPE1'])
+        else: metadata['artist'] = "Unknown Artist"
+            
+        if 'TALB' in audio.tags: metadata['album'] = str(audio.tags['TALB'])
+        else: metadata['album'] = "Unknown Album"
+            
+        if 'TIT2' in audio.tags: metadata['title'] = str(audio.tags['TIT2'])
+        else: metadata['title'] = os.path.basename(fn).replace('.mp3', '')
+            
+        if 'TRCK' in audio.tags: metadata['track_number'] = str(audio.tags['TRCK'])
+        else: metadata['track_number'] = "0"
+            
+        if 'TDRC' in audio.tags: metadata['year'] = str(audio.tags['TDRC'])
+        else: metadata['year'] = "Unknown Year"
+            
+        if 'TCON' in audio.tags: metadata['genre'] = str(audio.tags['TCON'])
+        else: metadata['genre'] = "Unknown Genre"
+
+        if imagePath is not None:
+            foundImage = False
+            if audio.tags:
+                for tagKey in audio.tags.keys():
+                    if tagKey.startswith("APIC:"):
+                        with open(imagePath, 'wb') as img_file:
+                            img_file.write(audio.tags[tagKey].data)
+                        foundImage = True
+                        break
+            if not foundImage:
+                print("No image found in metadata.")
+    
+    except Exception as e:
+        print(f"Error extracting metadata from {fn}: {e}")
+        # Set default values if extraction fails
+        metadata = {
+            'artist': "Unknown Artist",
+            'album': "Unknown Album",
+            'title': os.path.basename(fn).replace('.mp3', ''),
+            'track_number': "0",
+            'year': "Unknown Year",
+            'genre': "Unknown Genre"
+        }
+    
+    return metadata
+
+def guessMimeType(imagePath):
+    ext = os.path.splitext(imagePath.lower())[1]
+    if ext in ['.jpg', '.jpeg']:
+        return 'image/jpeg'
+    elif ext == '.png':
+        return 'image/png'
+    return 'image/png'
+
+def setMp3Metadata(fn, metadata, imagePath=None):
+    '''
+    This function takes a path to an mp3 and a metadata dictionary,
+    then writes that metadata to the file's ID3 tags.
+    
+    The metadata dictionary should have these keys:
+    - artist, album, title, track_number, year, genre
+    
+    Additionally, an optional imagePath parameter can be provided to
+    attach album artwork from a PNG or JPEG file.
+    
+    Alternatively, you can include an 'imagePath' key in the metadata
+    dictionary instead of using the separate parameter.
+    '''
+    try:
+        # Try to load existing ID3 tags or create new ones if they don't exist
+        try:
+            audio = ID3(fn)
+        except:
+            audio = ID3()
+            
+        # Set artist
+        if 'artist' in metadata and metadata['artist']: audio['TPE1'] = TPE1(encoding=3, text=metadata['artist'])
+        if 'album' in metadata and metadata['album']: audio['TALB'] = TALB(encoding=3, text=metadata['album'])
+        if 'title' in metadata and metadata['title']: audio['TIT2'] = TIT2(encoding=3, text=metadata['title'])
+        if 'track_number' in metadata and metadata['track_number']: audio['TRCK'] = TRCK(encoding=3, text=metadata['track_number'])
+        if 'year' in metadata and metadata['year']: audio['TDRC'] = TDRC(encoding=3, text=metadata['year'])
+        if 'genre' in metadata and metadata['genre']: audio['TCON'] = TCON(encoding=3, text=metadata['genre'])
+        if 'comment' in metadata and metadata['comment']: audio['COMM'] = COMM(encoding=3, text=metadata['comment'])
+        if 'lyrics' in metadata and metadata['lyrics']: audio['USLT'] = USLT(encoding=3, text=metadata['lyrics'])
+        if 'publisher' in metadata and metadata['publisher']: audio['TPUB'] = TPE2(encoding=3, text=metadata['publisher'])
+        if 'composer' in metadata and metadata['composer']: audio['TCOM'] = TCOM(encoding=3, text=metadata['composer'])
+        if 'conductor' in metadata and metadata['conductor']: audio['TPE3'] = TPE3(encoding=3, text=metadata['conductor'])
+        if 'performer' in metadata and metadata['performer']: audio['TPE4'] = TPE4(encoding=3, text=metadata['performer'])
+        if 'copyright' in metadata and metadata['copyright']: audio['TCOP'] = TCOP(encoding=3, text=metadata['copyright'])
+        if 'encoded_by' in metadata and metadata['encoded_by']: audio['TENC'] = TENC(encoding=3, text=metadata['encoded_by'])
+        if 'encoder' in metadata and metadata['encoder']: audio['TENC'] = TENC(encoding=3, text=metadata['encoder'])
+        if 'isrc' in metadata and metadata['isrc']: audio['TSRC'] = TSRC(encoding=3, text=metadata['isrc'])
+        if 'bpm' in metadata and metadata['bpm']: audio['TBPM'] = TBPM(encoding=3, text=metadata['bpm'])
+        # Check if image path is in metadata dictionary and not provided as parameter
+        if imagePath is None and 'imagePath' in metadata:
+            imagePath = metadata['imagePath']
+        
+        # Attach image if provided
+        if imagePath and os.path.exists(imagePath):
+            with open(imagePath, 'rb') as img_file:
+                img_data = img_file.read()
+                
+            # Determine image MIME type
+            mime = guessMimeType(imagePath)
+                
+            # Create APIC frame for album artwork
+            audio['APIC'] = APIC(
+                encoding=3,         # UTF-8 encoding
+                mime=mime,          # MIME type of the image
+                type=3,             # 3 means 'Cover (front)'
+                desc='Cover',       # Description
+                data=img_data       # The image data
+            )
+                
+        # Save changes to the file
+        audio.save(fn)
+        return True
+    
+    except Exception as e:
+        print(f"Error writing metadata to {fn}: {e}")
+        return False
 
 
 def deleteFile(filePath:str, v:bool = False) -> bool:

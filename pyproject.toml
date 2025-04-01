@@ -4,8 +4,8 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "ccfx"
-version = "0.4.0"
-description = "This package implifies regular coommon actions for quick prototyping in a user friendly way"
+version = "0.5.0"
+description = "This package simplifies regular common actions for quick prototyping in a user friendly way"
 readme = "README.md"
 license = {text = "MIT"}
 authors = [{name = "Celray James CHAWANDA", email = "celray@chawanda.com"}]
@@ -27,6 +27,7 @@ dependencies = [
     "sqlalchemy",
     "python-docx",
     "py7zr",
+    "mutagen",
 ]
 
 [project.urls]
