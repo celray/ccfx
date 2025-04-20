@@ -29,7 +29,12 @@ import subprocess
 import multiprocessing
 from mutagen.mp3 import MP3
 from mutagen.id3 import ID3, TPE1, TALB, TIT2, TRCK, TDRC, TCON, APIC, COMM, USLT, TPE2, TCOM, TPE3, TPE4, TCOP, TENC, TSRC, TBPM
-
+from concurrent.futures import ThreadPoolExecutor
+import math
+import requests
+from tqdm import tqdm
+import yt_dlp
+from typing import Optional
 
 # functions
 def listFiles(path: str, ext: str = None) -> list:
@@ -116,8 +121,8 @@ def getMp3Metadata(fn, imagePath=None):
             'year': "Unknown Year",
             'genre': "Unknown Genre"
         }
-    
     return metadata
+    
 
 def guessMimeType(imagePath):
     ext = os.path.splitext(imagePath.lower())[1]
@@ -126,6 +131,55 @@ def guessMimeType(imagePath):
     elif ext == '.png':
         return 'image/png'
     return 'image/png'
+
+
+def downloadYoutubeVideo(url: str, dstDir: str, audioOnly: bool = False, dstFileName: Optional[str] = None ) -> str:
+    """
+    Download from YouTube via yt-dlp.
+
+    Args:
+        url: YouTube URL
+        dstDir: output directory (created if missing)
+        audioOnly: if True, extract MP3
+        dstFileName: exact filename (with extension). If None, uses title.
+
+    Returns: Full path to downloaded file.
+    """
+    os.makedirs(dstDir, exist_ok=True)
+
+    if dstFileName is None:
+        template = os.path.join(dstDir, "%(title)s.%(ext)s")
+    else:
+        template = os.path.join(dstDir, dstFileName)
+
+    opts = {"outtmpl": template}
+
+    if audioOnly:
+        opts.update({
+            "format": "bestaudio/best",
+            "postprocessors": [{
+                "key": "FFmpegExtractAudio",
+                "preferredcodec": "mp3",
+                "preferredquality": "192",
+            }],
+        })
+    else:
+        # prefer a single MP4 file (progressive), fallback to any best if none
+        opts["format"] = "bestvideo[ext=mp4]+bestaudio[ext=m4a]/best[ext=mp4]/best"
+
+    with yt_dlp.YoutubeDL(opts) as ytdl:
+        info = ytdl.extract_info(url, download=True)
+
+    # determine final filename
+    if dstFileName:
+        final = dstFileName
+    else:
+        ext = "mp3" if audioOnly else info.get("ext", "mp4")
+        title = info.get("title", "video")
+        final = f"{title}.{ext}"
+
+    return os.path.join(dstDir, final)
+
 
 def setMp3Metadata(fn, metadata, imagePath=None):
     '''
@@ -245,6 +299,82 @@ def deletePath(path:str, v:bool = False) -> bool:
         if v:
             print(f'! {path} does not exist')
         deleted = False
+
+
+def downloadChunk(url, start, end, path):
+    headers = {'Range': f'bytes={start}-{end}'}
+    response = requests.get(url, headers=headers, stream=True)
+    with open(path, 'wb') as f:
+        for chunk in response.iter_content(chunk_size=8192):
+            if chunk:
+                f.write(chunk)
+
+def downloadFile(url, save_path, exists_action='resume', num_connections=5, v=False):
+    if v:
+        print(f"\ndownloading {url}")
+    fname = getFileBaseName(url, extension=True)
+    save_dir = os.path.dirname(save_path)
+    save_fname = "{0}/{1}".format(save_dir, fname)
+
+    if not os.path.isdir(save_dir):
+        os.makedirs(save_dir)
+
+    # Handle existing file
+    if os.path.exists(save_fname):
+        if exists_action == 'skip':
+            if v:
+                print(f"File exists, skipping: {save_fname}")
+            return
+        elif exists_action == 'overwrite':
+            os.remove(save_fname)
+        # 'resume' is handled below
+
+    # Get file size
+    response = requests.head(url)
+    file_size = int(response.headers.get('content-length', 0))
+
+    # Resume download if file exists and exists_action is 'resume'
+    initial_pos = 0
+    if exists_action == 'resume' and os.path.exists(save_fname):
+        initial_pos = os.path.getsize(save_fname)
+        if initial_pos >= file_size:
+            if v:
+                print(f"File already completed: {save_fname}")
+            return
+
+    # Calculate chunk sizes
+    chunk_size = math.ceil((file_size - initial_pos) / num_connections)
+    chunks = []
+    for i in range(num_connections):
+        start = initial_pos + (i * chunk_size)
+        end = min(start + chunk_size - 1, file_size - 1)
+        chunks.append((start, end))
+
+    # Download chunks in parallel
+    temp_files = [f"{save_fname}.part{i}" for i in range(num_connections)]
+    with ThreadPoolExecutor(max_workers=num_connections) as executor:
+        futures = []
+        for i, (start, end) in enumerate(chunks):
+            futures.append(
+                executor.submit(downloadChunk, url, start, end, temp_files[i])
+            )
+        
+        # Wait for all downloads to complete with progress bar
+        with tqdm(total=file_size-initial_pos, initial=initial_pos, unit='B', 
+                 unit_scale=True, desc=fname) as pbar:
+            completed = initial_pos
+            while completed < file_size:
+                current = sum(os.path.getsize(f) for f in temp_files if os.path.exists(f))
+                pbar.update(current - completed)
+                completed = current
+
+    # Merge chunks
+    with open(save_fname, 'ab' if initial_pos > 0 else 'wb') as outfile:
+        for temp_file in temp_files:
+            if os.path.exists(temp_file):
+                with open(temp_file, 'rb') as infile:
+                    outfile.write(infile.read())
+                os.remove(temp_file)
 
 
 def mergeRasterTiles(tileList:list, outFile:str) -> str:
@@ -410,6 +540,26 @@ def readFrom(filename, decode_codec = None, v=False):
     if v: print("\t> read {0}".format(getFileBaseName(filename, extension=True)))
     g.close
     return file_text
+
+
+def pointsToGeodataframe(point_pairs_list, columns = ['latitude', 'longitude'], auth = "EPSG", code = '4326', out_shape = '', format = 'gpkg', v = False, get_geometry_only = False):
+    df = pandas.DataFrame(point_pairs_list, columns = columns)
+    geometry = [Point(xy) for xy in zip(df['latitude'], df['longitude'])]
+
+    if get_geometry_only:
+        return geometry[0]
+
+    gdf = geopandas.GeoDataFrame(point_pairs_list, columns = columns, geometry=geometry)
+    drivers = {'gpkg': 'GPKG', 'shp': 'ESRI Shapefile'}
+
+    gdf = gdf.set_crs(f'{auth}:{code}')
+    
+    if out_shape != '':
+        if v: print(f'creating shapefile {out_shape}')
+        gdf.to_file(out_shape, driver=drivers[format])
+    
+    return gdf
+
 
 def readFile(filename, decode_codec = None, v=False):
     return readFrom(filename, decode_codec, v)
@@ -1112,6 +1262,29 @@ def listAllFiles(folder, extension="*"):
                     # print(os.path.join(r, file))
 
     return list_of_files
+
+
+def clipFeatures(inputFeaturePath:str, boundaryFeature:str, outputFeature:str, keepOnlyTypes = None, v = False) -> geopandas.GeoDataFrame:
+    '''
+    keepOnlyTypes = ['MultiPolygon', 'Polygon', 'Point', etc]
+    
+    '''
+    mask_gdf = geopandas.read_file(boundaryFeature)
+    input_gdf = geopandas.read_file(inputFeaturePath)
+
+    outDir = os.path.dirname(outputFeature)
+    createPath(f"{outDir}/")
+    out_gdf = input_gdf.clip(mask_gdf.to_crs(input_gdf.crs))
+
+    if not keepOnlyTypes is None:
+        out_gdf = out_gdf[out_gdf.geometry.apply(lambda x : x.type in keepOnlyTypes)]
+
+    out_gdf.to_file(outputFeature)
+
+    if v:
+        print("\t  - clipped feature to " + outputFeature)
+    return out_gdf
+
 
 
 def createPointGeometry(coords: list, proj: str = "EPSG:4326") -> geopandas.GeoDataFrame:

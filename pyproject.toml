@@ -4,19 +4,19 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "ccfx"
-version = "0.5.0"
+version = "0.9.0"
 description = "This package simplifies regular common actions for quick prototyping in a user friendly way"
 readme = "README.md"
-license = {text = "MIT"}
+license = "MIT"
 authors = [{name = "Celray James CHAWANDA", email = "celray@chawanda.com"}]
 classifiers = [
     "Programming Language :: Python :: 3",
-    "License :: OSI Approved :: MIT License",
     "Operating System :: OS Independent",
 ]
 requires-python = ">=3.10"
 dependencies = [
     "netCDF4",
+    "yt_dlp",
     "gdal",
     "numpy",
     "shapely",
@@ -28,8 +28,9 @@ dependencies = [
     "python-docx",
     "py7zr",
     "mutagen",
+    "requests",
+    "tqdm",
 ]
 
 [project.urls]
 "Homepage" = "https://github.com/celray/ccfx"
-
