@@ -238,7 +238,6 @@ def parseYoutubeChannelVideos(channelUrl: str, maxItems: Optional[int] = None) -
     return [f"https://www.youtube.com/watch?v={e['id']}" for e in entries if e.get("id")]
 
 
-
 def runSWATPlus(txtinoutDir: str, finalDir: str, executablePath: str = "swatplus", v: bool = True):
     os.chdir(txtinoutDir)
 
@@ -267,6 +266,7 @@ def runSWATPlus(txtinoutDir: str, finalDir: str, executablePath: str = "swatplus
         day_cycle = []
         previous_time = None
 
+        counter = 0
         while True:
             line = process.stdout.readline()
             line_parts = str(line).strip().split()
@@ -299,7 +299,7 @@ def runSWATPlus(txtinoutDir: str, finalDir: str, executablePath: str = "swatplus
                 else:
                     eta_str = ''
 
-                showProgress(current, number_of_days, bar_length=20, message= f'  >> current date: {day}/{month}/{year} - f{yr_to} {eta_str}')
+                showProgress(current, number_of_days, barLength=20, message= f'  >> current date: {day}/{month}/{year} - f{yr_to} {eta_str}')
 
                 previous_time = datetime.now()
             elif "ntdll.dll" in line_parts:
@@ -314,7 +314,6 @@ def runSWATPlus(txtinoutDir: str, finalDir: str, executablePath: str = "swatplus
         print("\n")
     
     os.chdir(finalDir)
-
 
 
 def formatTimedelta(delta: timedelta) -> str:
