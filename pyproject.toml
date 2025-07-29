@@ -4,7 +4,7 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "ccfx"
-version = "0.9.0"
+version = "1.0.2"
 description = "This package simplifies regular common actions for quick prototyping in a user friendly way"
 readme = "README.md"
 license = "MIT"

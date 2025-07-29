@@ -14,7 +14,7 @@ import os, sys
 import glob
 import warnings
 from netCDF4 import Dataset
-from osgeo import gdal, osr
+from osgeo import gdal, ogr, osr
 import numpy
 from genericpath import exists
 import shutil
@@ -23,7 +23,7 @@ import pickle
 import time
 from shapely.geometry import box, Point
 import geopandas, pandas
-from osgeo import gdal, ogr, osr
+from collections import defaultdict
 import py7zr
 import subprocess
 import multiprocessing
@@ -35,9 +35,10 @@ import requests
 from tqdm import tqdm
 import yt_dlp
 from typing import Optional
+from datetime import datetime, timedelta
 
 # functions
-def listFiles(path: str, ext: str = None) -> list:
+def listFiles(path: str, ext: Optional[str] = None) -> list:
     '''
     List all files in a directory with a specific extension
     path: directory
@@ -133,7 +134,7 @@ def guessMimeType(imagePath):
     return 'image/png'
 
 
-def downloadYoutubeVideo(url: str, dstDir: str, audioOnly: bool = False, dstFileName: Optional[str] = None ) -> str:
+def downloadYoutubeVideo(url: str, dstDir: str, audioOnly: bool = False, cookiesFile: Optional[str] = None, dstFileName: Optional[str] = None ) -> str:
     """
     Download from YouTube via yt-dlp.
 
@@ -154,6 +155,9 @@ def downloadYoutubeVideo(url: str, dstDir: str, audioOnly: bool = False, dstFile
 
     opts = {"outtmpl": template}
 
+    if cookiesFile:
+        opts["cookiefile"] = cookiesFile
+
     if audioOnly:
         opts.update({
             "format": "bestaudio/best",
@@ -163,6 +167,7 @@ def downloadYoutubeVideo(url: str, dstDir: str, audioOnly: bool = False, dstFile
                 "preferredquality": "192",
             }],
         })
+        
     else:
         # prefer a single MP4 file (progressive), fallback to any best if none
         opts["format"] = "bestvideo[ext=mp4]+bestaudio[ext=m4a]/best[ext=mp4]/best"
@@ -179,6 +184,158 @@ def downloadYoutubeVideo(url: str, dstDir: str, audioOnly: bool = False, dstFile
         final = f"{title}.{ext}"
 
     return os.path.join(dstDir, final)
+
+
+def parseYoutubePlaylist(playlistUrl: str) -> list[str]:
+    """
+    Return a list of full video URLs contained in a YouTube playlist.
+
+    Args:
+        playlistUrl: Full URL of the playlist (the one with &list=… or /playlist?list=…).
+
+    Returns:
+        List of video URLs in the order reported by YouTube.
+    """
+    opts = {
+        "quiet": True,
+        "extract_flat": "in_playlist",   # don’t recurse into each video
+    }
+
+    with yt_dlp.YoutubeDL(opts) as ytdl:
+        info = ytdl.extract_info(playlistUrl, download=False)
+
+    entries = info.get("entries", [])
+    return [f"https://www.youtube.com/watch?v={e['id']}" for e in entries if e.get("id")]
+
+
+def parseYoutubeChannelVideos(channelUrl: str, maxItems: Optional[int] = None) -> list[str]:
+    """
+    Return a list of video URLs published on a channel.
+
+    Args:
+        channelUrl: Any canonical channel URL, e.g.
+                    - https://www.youtube.com/@LinusTechTips
+                    - https://www.youtube.com/channel/UCXuqSBlHAE6Xw-yeJA0Tunw
+                    - https://www.youtube.com/c/NASA/videos
+        maxItems:   Optional hard limit. If None, returns every video the API exposes.
+
+    Returns:
+        List of video URLs, newest-first (YouTube’s default order).
+    """
+    opts = {
+        "quiet": True,
+        "extract_flat": True,      # treat the channel as one big “playlist”
+        "skip_download": True,
+    }
+
+    with yt_dlp.YoutubeDL(opts) as ytdl:
+        info = ytdl.extract_info(channelUrl, download=False)
+
+    entries = info.get("entries", [])
+    if maxItems is not None:
+        entries = entries[:maxItems]
+
+    return [f"https://www.youtube.com/watch?v={e['id']}" for e in entries if e.get("id")]
+
+
+
+def runSWATPlus(txtinoutDir: str, finalDir: str, executablePath: str = "swatplus", v: bool = True):
+    os.chdir(txtinoutDir)
+
+    if not v:
+        # Run the SWAT+ but ignore output and errors
+        subprocess.run([executablePath], stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+    else:
+        
+        yrs_line = readFrom('time.sim')[2].strip().split()
+
+        yr_from = int(yrs_line[1])
+        yr_to = int(yrs_line[3])
+
+        delta = datetime(yr_to, 12, 31) - datetime(yr_from, 1, 1)
+
+        CREATE_NO_WINDOW = 0x08000000
+
+        if platform.system() == "Windows":
+            process = subprocess.Popen(executablePath, stdout=subprocess.PIPE, creationflags=CREATE_NO_WINDOW )
+        else:
+            process = subprocess.Popen(executablePath, stdout=subprocess.PIPE)
+
+        current = 0
+        number_of_days = delta.days + 1
+
+        day_cycle = []
+        previous_time = None
+
+        while True:
+            line = process.stdout.readline()
+            line_parts = str(line).strip().split()
+            if not "Simulation" in line_parts: pass
+            elif 'Simulation' in line_parts:
+                ref_index = str(line).strip().split().index("Simulation")
+                year = line_parts[ref_index + 3]
+                month = line_parts[ref_index + 1]
+                day = line_parts[ref_index + 2]
+
+
+                month = f"0{month}" if int(month) < 10 else month
+                day = f"0{day}" if int(day) < 10 else day
+                
+                current += 1
+                
+                if not previous_time is None:
+                    day_cycle.append(datetime.now() - previous_time)
+
+                if len(day_cycle) > 40:
+                    if len(day_cycle) > (7 * 365.25):
+                        del day_cycle[0]
+
+                    av_cycle_time = sum(day_cycle, timedelta()) / len(day_cycle)
+                    eta = av_cycle_time * (number_of_days - current)
+
+                    eta_str = f"  ETA - {formatTimedelta(eta)}:"
+                    
+
+                else:
+                    eta_str = ''
+
+                showProgress(current, number_of_days, bar_length=20, message= f'  >> current date: {day}/{month}/{year} - f{yr_to} {eta_str}')
+
+                previous_time = datetime.now()
+            elif "ntdll.dll" in line_parts:
+                print("\n! there was an error running SWAT+\n")
+            if counter < 10:
+                counter += 1
+                continue
+
+            if len(line_parts) < 2: break
+
+        showProgress(current, number_of_days, string_after= f'                                                                                      ')
+        print("\n")
+    
+    os.chdir(finalDir)
+
+
+
+def formatTimedelta(delta: timedelta) -> str:
+    """Formats a timedelta duration to [N days] %H:%M:%S format"""
+    seconds = int(delta.total_seconds())
+
+    secs_in_a_day = 86400
+    secs_in_a_hour = 3600
+    secs_in_a_min = 60
+
+    days, seconds = divmod(seconds, secs_in_a_day)
+    hours, seconds = divmod(seconds, secs_in_a_hour)
+    minutes, seconds = divmod(seconds, secs_in_a_min)
+
+    time_fmt = f"{hours:02d}:{minutes:02d}:{seconds:02d}"
+
+    if days > 0:
+        suffix = "s" if days > 1 else ""
+        return f"{days} day{suffix} {time_fmt}"
+    else:
+        return f"{time_fmt}"
 
 
 def setMp3Metadata(fn, metadata, imagePath=None):
@@ -276,6 +433,38 @@ def deleteFile(filePath:str, v:bool = False) -> bool:
     
     return deleted
 
+
+def alert(message:str, server:str = "http://ntfy.sh", topic:str = "pythonAlerts", attachment:Optional[str] = None, messageTitle:str = "info", priority:int = None, tags:list = [],  printIt:bool = True, v:bool = False) -> bool:
+    '''
+    This sends an alert to a given server in case you want to be notified of something
+    message         : the message to send
+    server          : the server to send the message to (default is http://ntfy.sh)
+    topic           : the topic to send the message to (default is pythonAlerts)
+    attachment      : a file to attach to the message (optional)
+    messageTitle    : the title of the message (optional, default is info)
+    priority        : the priority of the message (optional, default is None)
+    tags            : a list of tags to add to the message (optional, default is empty list)
+    printIt         : whether to print the message to the console (default is True)
+    v               : verbose (default is False, set to True to print debug info)
+
+    return: True if the alert was sent successfully, False otherwise
+    '''
+    print(message) if printIt else None; header_data = {}
+    if not messageTitle is None: header_data["Title"] = messageTitle
+    if not priority is None: header_data["Priority"] = priority
+    if not len(tags) == 0: header_data["Tags"] = ",".join(tags)
+
+    try:
+        if v: print(f"sending alert to {server}/{topic}")
+        if not attachment is None:
+            header_data["Filename"] = getFileBaseName(attachment)
+            requests.put( f"{server}/{topic}", data=open(attachment, 'rb'), headers=header_data )
+        try: requests.post(f"{server}/{topic}",data=message, headers=header_data )
+        except: return False
+    except: return False
+    return True
+
+
 def deletePath(path:str, v:bool = False) -> bool:
     '''
     Delete a directory
@@ -308,6 +497,38 @@ def downloadChunk(url, start, end, path):
         for chunk in response.iter_content(chunk_size=8192):
             if chunk:
                 f.write(chunk)
+
+
+def formatStringBlock(input_str, max_chars=70):
+    '''
+    This function takes a string and formats it into a block of text
+    with a maximum number of characters per line.
+
+    input_str: the string to format
+    max_chars: the maximum number of characters per line (default is 70)
+
+    '''
+    words = input_str.split(' ')
+    lines = []
+    current_line = ""
+
+    for word in words:
+        # If adding the next word to the current line would exceed the max_chars limit
+        if len(current_line) + len(word) > max_chars:
+            # Append current line to lines and start a new one
+            lines.append(current_line.strip())
+            current_line = word
+        else:
+            # Add the word to the current line
+            current_line += " " + word
+
+    # Append any remaining words
+    lines.append(current_line.strip())
+
+    return '\n'.join(lines)
+
+
+
 
 def downloadFile(url, save_path, exists_action='resume', num_connections=5, v=False):
     if v:
@@ -643,21 +864,45 @@ def renameNetCDFvariable(input_file: str, output_file: str, old_var_name: str, n
     except subprocess.CalledProcessError as e:
         print(f"Error: {e.stderr}")
 
-def compressTo7z(input_dir: str, output_file: str):
+
+def compressTo7z(input_dir: str, output_file: str, compressionLevel: int = 4, excludeExt: list = None, v: bool = False) -> None:
     """
     Compresses the contents of a directory to a .7z archive with maximum compression.
     
     :param input_dir: Path to the directory to compress
     :param output_file: Output .7z file path
+    :param compressionLevel: Compression level (0-9), default is 4 (maximum compression)
+    :param excludeExt: List of file extensions to exclude from compression
     """
+    if excludeExt is None:
+        excludeExt = []
+
     # Create the .7z archive with LZMA2 compression
-    with py7zr.SevenZipFile(output_file, 'w', filters=[{'id': py7zr.FILTER_LZMA2, 'preset': 9}]) as archive:
+    with py7zr.SevenZipFile(output_file, 'w', filters=[{'id': py7zr.FILTER_LZMA2, 'preset': compressionLevel}]) as archive:
         # Add each item in the input directory, avoiding the top-level folder in the archive
         for root, _, files in os.walk(input_dir):
             for file in files:
                 file_path = os.path.join(root, file)
+                
+                # Skip excluded file extensions
+                if any(file.endswith(ext) for ext in excludeExt):
+                    continue
                 # Add file to the archive with a relative path to avoid including the 'tmp' folder itself
                 archive.write(file_path, arcname=os.path.relpath(file_path, start=input_dir))
+    if v:
+        print(f"compressed {input_dir} to {output_file} with compression level {compressionLevel}.")
+
+
+def uncompress(inputFile: str, outputDir: str, v: bool = False) -> None:
+    """
+    Extracts an archive supported by py7zr (.7z, .zip, .tar, .tar.gz, .tar.bz2, .xz, .tar.xz) to outputDir.
+    inputFile: Path to the input archive file
+    outputDir: Directory where the contents will be extracted
+    v: Verbose flag to print extraction status (default is False)
+    """
+    if not exists(outputDir): createPath(outputDir)
+    with py7zr.SevenZipFile(inputFile, 'r') as archive: archive.extractall(path=outputDir)
+    if v: print(f"extracted {inputFile} to {outputDir}.")
 
 
 def moveDirectory(srcDir:str, destDir:str, v:bool = False) -> bool:
@@ -743,6 +988,21 @@ def clipRasterByExtent(inFile: str, outFile: str, bounds: tuple) -> str:
     gdal.Translate(outFile, ds, projWin=[bounds[0], bounds[3], bounds[2], bounds[1]])
     ds = None
     return outFile
+
+
+def clipRasterByVector(inFile: str, outFile: str, vectorFile: str) -> str:
+    '''
+    Clips a raster using GDAL warp with a vector file
+    inFile: input raster path
+    outFile: output path
+    vectorFile: vector file path (e.g., shapefile or GeoJSON)
+    return: output path
+    '''
+    ds = gdal.Open(inFile)
+    gdal.Warp(outFile, ds, cutlineDSName=vectorFile, cropToCutline=True)
+    ds = None
+    return outFile
+
 
 def clipVectorByExtent(inFile: str, outFile: str, bounds: tuple) -> str:
     '''
@@ -878,61 +1138,81 @@ def ignoreWarnings(ignore:bool = True, v:bool = False) -> None:
     return None
 
 
-def createGrid(shapefile_path: str, resolution: float, useDegree: bool=True) -> tuple:
+def createGrid(topLeft: list = None, bottomRight: list = None, resolution: float = None, 
+               inputShape: str = None, crs: str = "EPSG:4326", saveVector: str = None) -> geopandas.GeoDataFrame:
     '''
-    This function creates a grid of polygons based on a shapefile
-    shapefile_path: path to the shapefile
-    resolution: resolution of the grid
-    useDegree: use degree (default is True)
-
-    return: xx, yy, polygons, within_mask, gdf.crs, minx, miny
-    '''
-    # Read the shapefile
-    gdf = geopandas.read_file(shapefile_path)
-
-    if useDegree:
-        gdf = gdf.to_crs(epsg=4326)
+    This function creates a grid of polygons based on either a shapefile or corner coordinates
     
-    # Get the bounds of the shapefile
-    minx, miny, maxx, maxy = gdf.total_bounds
+    Parameters:
+    topLeft: list [lon, lat] - top left corner coordinates
+    bottomRight: list [lon, lat] - bottom right corner coordinates  
+    resolution: float - resolution of the grid
+    inputShape: str - path to the shapefile (optional, if provided bounds will be taken from here)
+    crs: str - coordinate reference system (default is "EPSG:4326")
+    saveVector: str - path to save the generated grid (optional)
+
+    Returns:
+    geopandas.GeoDataFrame - the generated grid
+    '''
+    # Input validation
+    if inputShape is None and (topLeft is None or bottomRight is None or resolution is None):
+        raise ValueError("Either provide inputShape OR provide topLeft, bottomRight, and resolution")
+    
+    if inputShape is not None and resolution is None:
+        raise ValueError("Resolution must be provided")
+    
+    # Get bounds from shapefile or coordinates
+    if inputShape is not None:
+        # Read the shapefile and get bounds
+        gdf = geopandas.read_file(inputShape)
+        gdf = gdf.to_crs(crs)
+        minx, miny, maxx, maxy = gdf.total_bounds
+        reference_geometry = gdf.unary_union
+    else:
+        # Use provided corner coordinates [lon, lat]
+        # Extract coordinates and determine actual bounds
+        lon1, lat1 = topLeft[0], topLeft[1]
+        lon2, lat2 = bottomRight[0], bottomRight[1]
+        
+        # Determine actual min/max values
+        minx = min(lon1, lon2)
+        maxx = max(lon1, lon2)
+        miny = min(lat1, lat2)
+        maxy = max(lat1, lat2)
+        reference_geometry = None
     
     # Create a grid based on the bounds and resolution
     x = numpy.arange(minx, maxx, resolution)
     y = numpy.arange(miny, maxy, resolution)
-    xx, yy = numpy.meshgrid(x, y)
     
-    # Create polygons for each grid cell, arranged in 2D array
-    grid_shape = xx.shape
-    polygons = numpy.empty(grid_shape, dtype=object)
-    for i in range(grid_shape[0]):
-        for j in range(grid_shape[1]):
-            x0, y0 = xx[i, j], yy[i, j]
+    # Create polygons for each grid cell
+    polygons = []
+    for i in range(len(y)):
+        for j in range(len(x)):
+            x0, y0 = x[j], y[i]
             x1, y1 = x0 + resolution, y0 + resolution
-            polygons[i, j] = box(x0, y0, x1, y1)
-    
-    # Flatten the polygons for GeoDataFrame creation
-    flat_polygons = polygons.ravel()
+            # Ensure we don't exceed the bounds
+            x1 = min(x1, maxx)
+            y1 = min(y1, maxy)
+            polygons.append(box(x0, y0, x1, y1))
     
     # Create a GeoDataFrame from the grid
-    grid_gdf = geopandas.GeoDataFrame({'geometry': flat_polygons}, crs=gdf.crs)
-
-    minx, miny, maxx, maxy = grid_gdf.total_bounds
-    print("   minx:", minx, "miny:", miny, "maxx:", maxx, "maxy:", maxy)
-
-    minx, miny, maxx, maxy = getVectorBounds(grid_gdf)
+    grid_gdf = geopandas.GeoDataFrame({'geometry': polygons}, crs=crs)
+    
     # Add a column to indicate if the cell intersects with the original shapefile
-    grid_gdf['within'] = grid_gdf.intersects(gdf.unary_union)
+    if reference_geometry is not None:
+        grid_gdf['within'] = grid_gdf.intersects(reference_geometry)
+    else:
+        # For coordinate-based grids, set all cells as within
+        grid_gdf['within'] = True
     
-    # Reshape the 'within' mask to grid shape
-    within_mask = grid_gdf['within'].values.reshape(grid_shape)
+    # Save the grid if path is provided
+    if saveVector is not None:
+        grid_gdf.to_file(saveVector, driver="GPKG")
+        print(f"Grid saved to {saveVector}")
     
-    # Save the grid
-    reprojectedGrid = grid_gdf.to_crs(epsg=4326)
+    return grid_gdf
 
-    grid_gdf.to_file("generatedGrid4326.gpkg", driver="GPKG")
-    reprojectedGrid.to_file("generatedGrid.gpkg", driver="GPKG")
-    
-    return xx, yy, polygons, within_mask, gdf.crs, minx, miny
 
 def setHomeDir(path:str) -> str:
     '''
@@ -989,7 +1269,7 @@ def netcdfVariableDimensions(ncFile: str, variable: str) -> dict:
     
     return bands_info
 
-def netcdfExportTif(ncFile: str, variable: str, outputFile: str = None, band: int = None, v:bool = True) -> gdal.Dataset:
+def netcdfExportTif(ncFile: str, variable: str, outputFile: Optional[str] = None, band: int = None, v:bool = True) -> gdal.Dataset:
     '''
     Export a variable from a NetCDF file to a GeoTiff file
     ncFile: NetCDF file
@@ -1232,7 +1512,7 @@ def showProgress(count: int, end: int, message: str, barLength: int = 100) -> No
     message: message to display
     barLength: length of the progress bar
     '''
-    percent = int(count / end * 100)
+    percent = float(count / end * 100)
     percentStr = f'{percent:03.1f}'
     filled = int(barLength * count / end)
     bar = '█' * filled + '░' * (barLength - filled)
@@ -1310,7 +1590,7 @@ def createPointGeometry(coords: list, proj: str = "EPSG:4326") -> geopandas.GeoD
     gdf.reset_index(inplace=True)
     return gdf
 
-def calculateTimeseriesStats(data:pandas.DataFrame, observed:str = None, simulated:str = None, resample:str = None ) -> dict:
+def calculateTimeseriesStats(data:pandas.DataFrame, observed:Optional[str] = None, simulated:Optional[str] = None, resample:Optional[str] = None ) -> dict:
     '''
     Calculate statistics for a timeseries
 
@@ -1454,7 +1734,7 @@ def calculateTimeseriesStats(data:pandas.DataFrame, observed:str = None, simulat
     }
 
 
-def getNSE(data:pandas.DataFrame, observed:str = None, simulated:str = None, resample:str = None ) -> float:
+def getNSE(data:pandas.DataFrame, observed:Optional[str] = None, simulated:Optional[str] = None, resample:Optional[str] = None ) -> float:
     '''
     this function is a wrapper for calculateTimeseriesStats specifically to return the NSE
 
@@ -1475,7 +1755,7 @@ def getNSE(data:pandas.DataFrame, observed:str = None, simulated:str = None, res
 
     return stats['NSE']
 
-def getKGE(data:pandas.DataFrame, observed:str = None, simulated:str = None, resample:str = None ) -> float:
+def getKGE(data:pandas.DataFrame, observed:Optional[str] = None, simulated:Optional[str] = None, resample:Optional[str] = None ) -> float:
     '''
     this function is a wrapper for calculateTimeseriesStats specifically to return the KGE
 
@@ -1496,7 +1776,7 @@ def getKGE(data:pandas.DataFrame, observed:str = None, simulated:str = None, res
 
     return stats['KGE']
 
-def getPBIAS(data:pandas.DataFrame, observed:str = None, simulated:str = None, resample:str = None ) -> float:
+def getPBIAS(data:pandas.DataFrame, observed:Optional[str] = None, simulated:Optional[str] = None, resample:Optional[str] = None ) -> float:
     '''
     this function is a wrapper for calculateTimeseriesStats specifically to return the PBIAS
 
@@ -1518,7 +1798,7 @@ def getPBIAS(data:pandas.DataFrame, observed:str = None, simulated:str = None, r
     return stats['PBIAS']
 
 
-def getLNSE(data:pandas.DataFrame, observed:str = None, simulated:str = None, resample:str = None ) -> float:
+def getLNSE(data:pandas.DataFrame, observed:Optional[str] = None, simulated:Optional[str] = None, resample:Optional[str] = None ) -> float:
     '''
     this function is a wrapper for calculateTimeseriesStats specifically to return the LNSE
 
@@ -1539,7 +1819,7 @@ def getLNSE(data:pandas.DataFrame, observed:str = None, simulated:str = None, re
 
     return stats['LNSE']
 
-def getR2(data:pandas.DataFrame, observed:str = None, simulated:str = None, resample:str = None ) -> float:
+def getR2(data:pandas.DataFrame, observed:Optional[str] = None, simulated:Optional[str] = None, resample:Optional[str] = None ) -> float:
     '''
     this function is a wrapper for calculateTimeseriesStats specifically to return the R2
 
@@ -1560,7 +1840,7 @@ def getR2(data:pandas.DataFrame, observed:str = None, simulated:str = None, resa
 
     return stats['R2']
 
-def getRMSE(data:pandas.DataFrame, observed:str = None, simulated:str = None, resample:str = None ) -> float:
+def getRMSE(data:pandas.DataFrame, observed:Optional[str] = None, simulated:Optional[str] = None, resample:Optional[str] = None ) -> float:
     '''
     this function is a wrapper for calculateTimeseriesStats specifically to return the RMSE
 
@@ -1581,7 +1861,7 @@ def getRMSE(data:pandas.DataFrame, observed:str = None, simulated:str = None, re
 
     return stats['RMSE']
 
-def getMAE(data:pandas.DataFrame, observed:str = None, simulated:str = None, resample:str = None ) -> float:
+def getMAE(data:pandas.DataFrame, observed:Optional[str] = None, simulated:Optional[str] = None, resample:Optional[str] = None ) -> float:
     '''
     this function is a wrapper for calculateTimeseriesStats specifically to return the MAE
 
@@ -1602,7 +1882,7 @@ def getMAE(data:pandas.DataFrame, observed:str = None, simulated:str = None, res
 
     return stats['MAE']
 
-def getMSE(data:pandas.DataFrame, observed:str = None, simulated:str = None, resample:str = None ) -> float:
+def getMSE(data:pandas.DataFrame, observed:Optional[str] = None, simulated:Optional[str] = None, resample:Optional[str] = None ) -> float:
     '''
     this function is a wrapper for calculateTimeseriesStats specifically to return the MSE
 
@@ -1623,7 +1903,7 @@ def getMSE(data:pandas.DataFrame, observed:str = None, simulated:str = None, res
 
     return stats['MSE']
 
-def getTimeseriesStats(data:pandas.DataFrame, observed:str = None, simulated:str = None, resample:str = None ) -> dict:
+def getTimeseriesStats(data:pandas.DataFrame, observed:Optional[str] = None, simulated:Optional[str] = None, resample:Optional[str] = None ) -> dict:
     '''
     this function is a wrapper for calculateTimeseriesStats specifically to return all stats
 
@@ -1643,5 +1923,108 @@ def getTimeseriesStats(data:pandas.DataFrame, observed:str = None, simulated:str
     stats = calculateTimeseriesStats(data, observed, simulated, resample)
 
     return stats
+
+def readSWATPlusOutputs(filePath: str, column: Optional[str] = None, unit: Optional[int] = None, gis_id: Optional[int] = None, name: Optional[str] = None):
+    '''
+    Read SWAT+ output files and return a pandas DataFrame with proper date handling
+    and optional filtering capabilities.
+    
+    Parameters:
+    -----------
+    filePath: str
+        Path to the SWAT+ output file
+    column: str, optional
+        Name of the column to extract. If not specified, returns all columns.
+        If specified, returns first match, or specify multiple columns as comma-separated string
+    unit: int, optional
+        Filter by unit number. If not specified, returns all units
+    gis_id: int, optional  
+        Filter by gis_id. If not specified, returns all gis_ids
+    name: str, optional
+        Filter by name. If not specified, returns all names
+        
+    Returns:
+    --------
+    pandas.DataFrame or None
+        DataFrame with date column and requested data, filtered as specified
+    '''
+    
+    if not exists(filePath):
+        print('! SWAT+ result file does not exist')
+        return None
+    
+    # Read the header line (line 2, index 1)
+    with open(filePath, 'r') as f:
+        lines = f.readlines()
+    
+    header_line = lines[1].strip()
+    headers = header_line.split()
+    
+    # Handle duplicate column names
+    column_counts = defaultdict(int)
+    modified_header = []
+    for col_name in headers:
+        column_counts[col_name] += 1
+        if column_counts[col_name] > 1:
+            modified_header.append(f"{col_name}_{column_counts[col_name]}")
+        else:
+            modified_header.append(col_name)
+    
+    # Add extra columns to handle potential mismatches
+    modified_header = modified_header + ['extra1', 'extra2']
+    
+    try:
+        df = pandas.read_csv(filePath, delim_whitespace=True, skiprows=3, names=modified_header, index_col=False)
+    except:
+        sys.stdout.write(f'\r! could not read {filePath} using pandas, check the number of columns\n')
+        sys.stdout.flush()
+        return None
+    
+    # Remove extra columns
+    df = df.drop(columns=['extra1', 'extra2'], errors='ignore')
+    
+    # Convert all columns to numeric except 'name' (which is string)
+    for col in df.columns:
+        if col != 'name':
+            df[col] = pandas.to_numeric(df[col], errors='coerce')
+    
+    # Create date column from yr, mon, day
+    try:
+        df['date'] = pandas.to_datetime(pandas.DataFrame({'year': df.yr, 'month': df.mon, 'day': df.day}))
+    except KeyError:
+        # If some date columns are missing, create a simple index-based date
+        df['date'] = pandas.date_range(start='2000-01-01', periods=len(df), freq='D')
+    except:
+        # If date creation fails for any other reason, use index-based date
+        df['date'] = pandas.date_range(start='2000-01-01', periods=len(df), freq='D')
+    
+    # Filter by unit if specified
+    if unit is not None and 'unit' in df.columns:
+        df = df[df['unit'] == unit]
+    
+    # Filter by gis_id if specified
+    if gis_id is not None and 'gis_id' in df.columns:
+        df = df[df['gis_id'] == gis_id]
+    
+    # Filter by name if specified
+    if name is not None and 'name' in df.columns:
+        df = df[df['name'] == name]
+    
+    # Handle column selection
+    if column is not None and column != "*":
+        # Parse comma-separated columns
+        requested_cols = [col.strip() for col in column.split(',')]
+        
+        # Always include date column
+        selected_cols = ['date']
+        
+        # Add requested columns if they exist
+        for req_col in requested_cols:
+            if req_col in df.columns:
+                selected_cols.append(req_col)
+        
+        df = df[selected_cols]
+    
+    return df
 
 ignoreWarnings()

@@ -29,7 +29,7 @@ class excel:
         self.date_format = None
 
     def create(self):
-        self.create_path(os.path.dirname(self.path))
+        self.createPath(os.path.dirname(self.path))
         self.book = xlsxwriter.Workbook(self.path)
 
     def addSheet(self, sheet_name):
@@ -42,7 +42,7 @@ class excel:
 
     def writeDate(self, sheet_name, row, column, datetime_obj):
         if self.date_format is None:
-            self.set_date_format()
+            self.setDateFormat()
             
         self.sheet_names[sheet_name].write_datetime(
             row, column, datetime_obj, self.date_format)

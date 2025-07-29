@@ -21,7 +21,7 @@ import geopandas
 
 
 # classes
-class mssql_connection:
+class mssqlConnection:
     def __init__(self, server, username, password, driver, trust_server_ssl = True) -> None:
         self.server     = server
         self.username   = username
@@ -85,19 +85,48 @@ class mssql_connection:
             self.cursor = self.connection.cursor()
             self.cursor.execute(query)
             tables = [row[0] for row in self.cursor.fetchall()]
-            print("> list of tables in the active database:")
-            for table in tables:
-                print(f"\t- {table}")
+            # print("> list of tables in the active database:")
+            # for table in tables:
+            #     print(f"\t- {table}")
         except pyodbc.Error as e:
             print("Error occurred while fetching the list of tables:")
             print(e)
         
         return tables
     
+    def listColumns(self, tableName: str, dbName: str | None = None) -> list[str]:
+        if dbName:
+            self.connect_db(dbName)
+
+        schema, tbl = ('dbo', tableName) if '.' not in tableName else tableName.split('.', 1)
+
+        sql = """
+            SELECT column_name
+            FROM information_schema.columns
+            WHERE table_schema = ? AND table_name = ?
+            ORDER BY ordinal_position
+        """
+
+        try:
+            with self.connection.cursor() as cur:
+                cur.execute(sql, (schema, tbl))
+                return [row[0] for row in cur.fetchall()]
+        except pyodbc.Error as e:
+            print(f"Could not list columns for {tableName}: {e}")
+            return []
+
         
     def readTable(self, table_name:str, db_name:str = None, columns:list = None, geom_col:str = None, v = True):
         if db_name is not None:
             self.connect_db(db_name)
+
+        # ensure geometry column is not in columns if specified
+        if geom_col is not None:
+            if columns is None:
+                columns = self.listColumns(table_name, db_name)
+                
+            columns = [col for col in columns if col != geom_col]
+
 
         if columns is not None and geom_col is not None:
             columns.append(f"{geom_col}.STAsText() as {geom_col}_wkt")
@@ -221,7 +250,9 @@ class mssql_connection:
             self.connection.close()
             self.connection = None
             self.cursor = None
-        if v: print("> connection closed...")
+            if v: print("> connection closed...")
+        else:
+            if v: print("> no connection to close...")
 
     def disconnect(self, v = True):
         self.close(v = v)
