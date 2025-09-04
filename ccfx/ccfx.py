@@ -19,6 +19,7 @@ import numpy
 from genericpath import exists
 import shutil
 import platform
+import zipfile
 import pickle
 import time
 from shapely.geometry import box, Point
@@ -299,7 +300,7 @@ def runSWATPlus(txtinoutDir: str, finalDir: str, executablePath: str = "swatplus
                 else:
                     eta_str = ''
 
-                showProgress(current, number_of_days, barLength=20, message= f'  >> current date: {day}/{month}/{year} - f{yr_to} {eta_str}')
+                showProgress(current, number_of_days, barLength=20, message= f'  >> current date: {day}/{month}/{year} - {yr_to} {eta_str}')
 
                 previous_time = datetime.now()
             elif "ntdll.dll" in line_parts:
@@ -310,7 +311,7 @@ def runSWATPlus(txtinoutDir: str, finalDir: str, executablePath: str = "swatplus
 
             if len(line_parts) < 2: break
 
-        showProgress(current, number_of_days, string_after= f'                                                                                      ')
+        showProgress(current, number_of_days, message = f'                                                                                         ')
         print("\n")
     
     os.chdir(finalDir)
@@ -432,6 +433,34 @@ def deleteFile(filePath:str, v:bool = False) -> bool:
     
     return deleted
 
+def removeImageColour(inPath:str, outPath:str, colour:tuple = (255, 255, 255), tolerance:int = 30):
+    '''
+    Remove a specific color from an image.
+    colour: RGB tuple, e.g., (255, 0, 0) for red
+    '''
+    img = Image.open(inPath)
+    img = img.convert("RGBA")
+
+    data = img.getdata()
+
+    new_data = []
+    for item in data:
+        # Change all pixels that match the color to transparent
+        if item[0] in range(colour[0]-tolerance, colour[0]+tolerance) and \
+           item[1] in range(colour[1]-tolerance, colour[1]+tolerance) and \
+           item[2] in range(colour[2]-tolerance, colour[2]+tolerance):
+            new_data.append((255, 255, 255, 0))  # Change to transparent
+        else:
+            new_data.append(item)
+
+    img.putdata(new_data)
+    img.save(outPath)
+
+def makeTransparent(inPath:str, outPath:str, colour:tuple = (255, 255, 255), tolerance:int = 30):
+    '''
+    Make some pixels in an image transparent.
+    '''
+    removeImageColour(inPath, outPath, colour=colour, tolerance=tolerance)
 
 def alert(message:str, server:str = "http://ntfy.sh", topic:str = "pythonAlerts", attachment:Optional[str] = None, messageTitle:str = "info", priority:int = None, tags:list = [],  printIt:bool = True, v:bool = False) -> bool:
     '''
@@ -762,22 +791,35 @@ def readFrom(filename, decode_codec = None, v=False):
     return file_text
 
 
-def pointsToGeodataframe(point_pairs_list, columns = ['latitude', 'longitude'], auth = "EPSG", code = '4326', out_shape = '', format = 'gpkg', v = False, get_geometry_only = False):
-    df = pandas.DataFrame(point_pairs_list, columns = columns)
-    geometry = [Point(xy) for xy in zip(df['latitude'], df['longitude'])]
+def pointsToGeodataframe(
+    rowList,
+    columnNames,
+    latIndex,
+    lonIndex,
+    auth = "EPSG",
+    code = "4326",
+    outShape = "",
+    format = "gpkg",
+    v = False,
+    includeLatLon = True ) -> geopandas.GeoDataFrame:
+    df = pandas.DataFrame(rowList, columns = columnNames)
+    geometry = [
+        Point(row[lonIndex], row[latIndex]) for row in rowList
+    ]
 
-    if get_geometry_only:
-        return geometry[0]
+    if not includeLatLon:
+        colsToKeep = [col for i, col in enumerate(columnNames) if i not in (latIndex, lonIndex)]
+        df = df[colsToKeep]
 
-    gdf = geopandas.GeoDataFrame(point_pairs_list, columns = columns, geometry=geometry)
-    drivers = {'gpkg': 'GPKG', 'shp': 'ESRI Shapefile'}
+    gdf = geopandas.GeoDataFrame(df, geometry = geometry)
+    drivers = {"gpkg": "GPKG", "shp": "ESRI Shapefile"}
+    gdf = gdf.set_crs(f"{auth}:{code}")
 
-    gdf = gdf.set_crs(f'{auth}:{code}')
-    
-    if out_shape != '':
-        if v: print(f'creating shapefile {out_shape}')
-        gdf.to_file(out_shape, driver=drivers[format])
-    
+    if outShape != "":
+        if v:
+            print(f"creating shapefile {outShape}")
+        gdf.to_file(outShape, driver = drivers[format])
+
     return gdf
 
 
@@ -894,15 +936,45 @@ def compressTo7z(input_dir: str, output_file: str, compressionLevel: int = 4, ex
 
 def uncompress(inputFile: str, outputDir: str, v: bool = False) -> None:
     """
-    Extracts an archive supported by py7zr (.7z, .zip, .tar, .tar.gz, .tar.bz2, .xz, .tar.xz) to outputDir.
+    Extracts .7z, .zip, .tar, .tar.gz, .tar.bz2, .xz, .tar.xz archives to outputDir.
     inputFile: Path to the input archive file
     outputDir: Directory where the contents will be extracted
     v: Verbose flag to print extraction status (default is False)
     """
-    if not exists(outputDir): createPath(outputDir)
-    with py7zr.SevenZipFile(inputFile, 'r') as archive: archive.extractall(path=outputDir)
+    fileLower = inputFile.lower()
+    if not exists(outputDir):
+        createPath(outputDir)
+
+    if fileLower.endswith(".zip"):
+        with zipfile.ZipFile(inputFile, 'r') as archive:
+            archive.extractall(path=outputDir)
+    else:
+        with py7zr.SevenZipFile(inputFile, 'r') as archive:
+            archive.extractall(path=outputDir)
     if v: print(f"extracted {inputFile} to {outputDir}.")
 
+
+def uncompressFile(inputFile: str, outputDir: str, v: bool = False) -> None:
+    """
+    This is an alias for uncompress
+    """
+    uncompress(inputFile, outputDir, v)
+
+def unzipFile(inputFile: str, outputDir: str, v: bool = False) -> None:
+    """
+    this is an alias for uncompress
+    """
+    uncompress(inputFile, outputDir, v)
+
+def extractZip(inputFile: str, outputDir: str, v: bool = False) -> None:
+    """this is an alias for uncompress"""
+    uncompress(inputFile, outputDir, v)
+
+def extractCompressedFile(inputFile: str, outputDir: str, v: bool = False) -> None:
+    """
+    this is an alias for uncompress
+    """
+    uncompress(inputFile, outputDir, v)
 
 def moveDirectory(srcDir:str, destDir:str, v:bool = False) -> bool:
     '''
@@ -1416,14 +1488,14 @@ def copyDirectory(source:str, destination:str, recursive = True, v:bool = True, 
                 copyFile(s, d, v = False)
                 if v: showProgress(counter, itemCount, f'copying {getFileBaseName(item)}\t\t', barLength=50)
                 counter += 1
-    print()
+    if v:print()
 
 
 def copyFolder(source:str, destination:str, v:bool = True) -> None:
     '''
     this function is an alias for copyDirectory
     '''
-    copyDirectory(source, destination, v)
+    copyDirectory(source, destination, v=v)
 
 
 def convertCoordinates(lon, lat, srcEPSG, dstCRS) -> tuple:
@@ -1515,9 +1587,9 @@ def showProgress(count: int, end: int, message: str, barLength: int = 100) -> No
     percentStr = f'{percent:03.1f}'
     filled = int(barLength * count / end)
     bar = '█' * filled + '░' * (barLength - filled)
-    print(f'\r{bar}| {percentStr}% [{count}/{end}] | {message}       ', end='', flush=True)
+    print(f'\r{bar} {percentStr}% [{count}/{end}] | {message}       ', end='', flush=True)
     if count == end:
-        print(f'\r{bar}| {percentStr}% [{count}/{end}]                          ', end='', flush=True)
+        print(f'\r{bar} {percentStr}% [{count}/{end}]                          ', end='', flush=True)
         print()
 
 
